@@ -1,7 +1,7 @@
 # MultiScatteringAtmosphere
 
-Forked from SlightlyMad/AtmosphericScattering
-
+Forked from SlightlyMad/AtmosphericScattering to Unity2019 Built-in Pipeline
+ 
 Since the original repository only has single scattering, this repository considers multiple scattering.
 
 Render the atmosphere using approximate multiple scattering methods (MultiScattLUT)
