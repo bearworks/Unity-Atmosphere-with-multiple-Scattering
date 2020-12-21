@@ -1,6 +1,8 @@
 # MultiScatteringAtmosphere
 
-Forked from SlightlyMad/AtmosphericScattering 
+Forked from SlightlyMad/AtmosphericScattering
+
+Since the original repository only has single scattering, this repository considers multiple scattering.
 
 Render the atmosphere using approximate multiple scattering methods (MultiScattLUT)
 
