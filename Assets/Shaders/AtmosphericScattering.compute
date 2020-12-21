@@ -458,7 +458,7 @@ void PrecomputeLightScattering(float3 rayStart, float3 rayDir, float rayLength, 
 		scatterR += (localInscatterR + prevLocalInscatterR) * (stepSize / 2.0);
 		scatterM += (localInscatterM + prevLocalInscatterM) * (stepSize / 2.0);
 		//multiScatt += (avgDen.x * _ScatteringR + avgDen.y * _ScatteringM) * GetMultipleScattering(rayStart, planetCenter, -lightDir);
-		multiScatt += 0.001 * (avgDen.x + avgDen.y) * GetMultipleScattering(rayStart, planetCenter, lightDir);
+		multiScatt += 5e-4 * (avgDen.x + avgDen.y) * GetMultipleScattering(rayStart, planetCenter, lightDir);
 
 		prevLocalInscatterR = localInscatterR;
 		prevLocalInscatterM = localInscatterM;
