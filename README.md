@@ -19,3 +19,5 @@ sebh/UnrealEngineSkyAtmosphere
 
 ![](./Image/3.png)
 <p align="center">MultiScatterFactor = 30</p>
+
+![](./Image/4.png)
