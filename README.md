@@ -1,6 +1,6 @@
 # MultiScatteringAtmosphere
 
-Forked from SlightlyMad/AtmosphericScattering to Unity2019.4 Built-in Pipeline
+Forked from SlightlyMad/AtmosphericScattering to Unity2019.4 (Built-in Pipeline)
  
 Since the original repository only has single scattering, this repository considers multiple scattering.
 
