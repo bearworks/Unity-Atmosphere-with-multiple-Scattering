@@ -14,7 +14,7 @@ sebh/UnrealEngineSkyAtmosphere
 <p align="center">MultiScatterFactor = 0</p>
 
 ![](./Image/1.png)
-<p align="center">MultiScatterFactor = 25</p>
+<p align="center">MultiScatterFactor = 10</p>
 
 ![](./Image/2.png)
 <p align="center">MultiScatterFactor = 0</p>
@@ -23,3 +23,4 @@ sebh/UnrealEngineSkyAtmosphere
 <p align="center">MultiScatterFactor = 30</p>
 
 ![](./Image/4.png)
+<p align="center">MultiScatterFactor = 1</p>
