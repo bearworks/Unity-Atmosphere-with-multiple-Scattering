@@ -67,6 +67,9 @@ public class AtmosphericScattering : MonoBehaviour
     private RenderTexture _inscatteringLUT;
     private RenderTexture _extinctionLUT;
 
+    private Vector2 _multiscattLUTSize = new Vector2(32, 32);
+    private RenderTexture _multiscattLUT;
+
     private const int LightLUTSize = 128;
 
     [ColorUsage(false, true, 0, 15, 0, 15)]
@@ -104,6 +107,7 @@ public class AtmosphericScattering : MonoBehaviour
     [Range(0.0f, 0.999f)]
     public float MieG = 0.76f;
     public float DistanceScale = 1;
+    public float MultiScatterFactor = 10;
 
     public bool UpdateLightColor = true;
     [Range(0.5f, 3.0f)]
@@ -382,28 +386,43 @@ public class AtmosphericScattering : MonoBehaviour
             _skyboxLUT.Create();
         }
 
-#if HIGH_QUALITY
         if (_skyboxLUT2 == null)
         {
-            _skyboxLUT2 = new RenderTexture((int)_skyboxLUTSize.x, (int)_skyboxLUTSize.y, 0, RenderTextureFormat.RGHalf, RenderTextureReadWrite.Linear);
+            _skyboxLUT2 = new RenderTexture((int)_skyboxLUTSize.x, (int)_skyboxLUTSize.y, 0, RenderTextureFormat.ARGBHalf, RenderTextureReadWrite.Linear);
             _skyboxLUT2.volumeDepth = (int)_skyboxLUTSize.z;
             _skyboxLUT2.isVolume = true;
             _skyboxLUT2.enableRandomWrite = true;
             _skyboxLUT2.name = "SkyboxLUT2";
             _skyboxLUT2.Create();
         }
-#endif
 
         int kernel = ScatteringComputeShader.FindKernel("SkyboxLUT");
 
         ScatteringComputeShader.SetTexture(kernel, "_SkyboxLUT", _skyboxLUT);
-#if HIGH_QUALITY
         ScatteringComputeShader.SetTexture(kernel, "_SkyboxLUT2", _skyboxLUT2);
-#endif
 
         UpdateCommonComputeShaderParameters(kernel);
 
         ScatteringComputeShader.Dispatch(kernel, (int)_skyboxLUTSize.x, (int)_skyboxLUTSize.y, (int)_skyboxLUTSize.z);
+    }
+
+    private void PrecomputeMultiscattLUT()
+    {
+        if (_multiscattLUT == null)
+        {
+            _multiscattLUT = new RenderTexture((int)_multiscattLUTSize.x, (int)_multiscattLUTSize.y, 0, RenderTextureFormat.ARGBHalf, RenderTextureReadWrite.Linear);
+            _multiscattLUT.enableRandomWrite = true;
+            _multiscattLUT.name = "MultiscattLUT";
+            _multiscattLUT.Create();
+        }
+
+        int kernel = ScatteringComputeShader.FindKernel("NewMultiScattLUT");
+
+        ScatteringComputeShader.SetTexture(kernel, "_MultiscattLUT", _multiscattLUT);
+
+        UpdateCommonComputeShaderParameters(kernel);
+
+        ScatteringComputeShader.Dispatch(kernel, (int)_multiscattLUTSize.x, (int)_multiscattLUTSize.y, 1);
     }
 
     /// <summary>
@@ -412,6 +431,8 @@ public class AtmosphericScattering : MonoBehaviour
     private void UpdateCommonComputeShaderParameters(int kernel)
     {
         ScatteringComputeShader.SetTexture(kernel, "_ParticleDensityLUT", _particleDensityLUT);
+        ScatteringComputeShader.SetTexture(kernel, "_MultiscattLUTTex", _multiscattLUT);
+
         ScatteringComputeShader.SetFloat("_AtmosphereHeight", AtmosphereHeight);
         ScatteringComputeShader.SetFloat("_PlanetRadius", PlanetRadius);
         ScatteringComputeShader.SetVector("_DensityScaleHeight", DensityScale);
@@ -421,6 +442,8 @@ public class AtmosphericScattering : MonoBehaviour
         ScatteringComputeShader.SetVector("_ExtinctionR", RayleighSct * RayleighExtinctionCoef);
         ScatteringComputeShader.SetVector("_ExtinctionM", MieSct * MieExtinctionCoef);
 
+        ScatteringComputeShader.SetFloat("_MultiScatterFactor", MultiScatterFactor);
+        
         ScatteringComputeShader.SetVector("_IncomingLight", IncomingLight);
         ScatteringComputeShader.SetFloat("_MieG", MieG);
     }
@@ -490,6 +513,7 @@ public class AtmosphericScattering : MonoBehaviour
 
         material.SetTexture("_SkyboxLUT", _skyboxLUT);
         material.SetTexture("_SkyboxLUT2", _skyboxLUT2);
+        material.SetTexture("_MultiscattLUTTex", _multiscattLUT);
     }
 
     /// <summary>
@@ -525,6 +549,7 @@ public class AtmosphericScattering : MonoBehaviour
         _lightColorTextureTemp.ReadPixels(new Rect(0, 0, LightLUTSize, 1), 0, 0);
         _directionalLightLUT = _lightColorTextureTemp.GetPixels(0, 0, LightLUTSize, 1);
 
+        PrecomputeMultiscattLUT();
         PrecomputeSkyboxLUT();
     }
 

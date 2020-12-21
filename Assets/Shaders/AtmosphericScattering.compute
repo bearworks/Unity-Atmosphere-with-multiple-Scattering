@@ -27,12 +27,16 @@
 
 #pragma kernel SkyboxLUT
 #pragma kernel InscatteringLUT
+#pragma kernel NewMultiScattLUT
 
 RWTexture3D<float4> _SkyboxLUT;
-RWTexture3D<float2> _SkyboxLUT2;
+RWTexture3D<float4> _SkyboxLUT2;
 
 RWTexture3D<float4> _InscatteringLUT;
 RWTexture3D<float4> _ExtinctionLUT;
+
+RWTexture2D<float4> _MultiscattLUT;
+Texture2D<float4> _MultiscattLUTTex;
 
 Texture2D<float2> _ParticleDensityLUT;
 SamplerState sampler_ParticleDensityLUT;
@@ -57,11 +61,15 @@ float4 _TopRightCorner;
 float4 _LightDir;
 float4 _CameraPos;
 
+float _MultiScatterFactor;
+
 float4 _IncomingLight;
 float _MieG;
 float _DistanceScale;
 
 #define PI 3.14159265359
+
+#define MultiScatteringLUTRes 32
 
 //-----------------------------------------------------------------------------------------
 // ScatteringOutput
@@ -70,6 +78,7 @@ struct ScatteringOutput
 {
 	float3 rayleigh;
 	float3 mie;
+	float3 multiScatt;
 };
 
 //-----------------------------------------------------------------------------------------
@@ -139,16 +148,24 @@ void ApplyPhaseFunction(inout float3 scatterR, inout float3 scatterM, float cosA
 	scatterM *= phase;
 }
 
-//-----------------------------------------------------------------------------------------
-// IntegrateInscattering
-//-----------------------------------------------------------------------------------------
-ScatteringOutput IntegrateInscattering(float3 rayStart, float3 rayDir, float rayLength, float3 planetCenter, float3 lightDir)
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////MultiScater/////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+struct MulScatteringOutput
 {
-	float sampleCount = 64;
+	float3 Lumanice;		// Scattered light (luminance)
+	float3 MultiScatAs1;
+};
+
+MulScatteringOutput IntegrateMultiInscattering(float3 rayStart, float3 rayDir, float rayLength, float3 planetCenter, float3 lightDir)
+{
+	float sampleCount = 20;
 	float3 step = rayDir * (rayLength / sampleCount);
 	float stepSize = length(step);
 
 	float2 densityCP = 0;
+	float3 Lumanice = 0;
+	float3 MultiScatAs1 = 0;
 	float3 scatterR = 0;
 	float3 scatterM = 0;
 
@@ -169,15 +186,221 @@ ScatteringOutput IntegrateInscattering(float3 rayStart, float3 rayDir, float ray
 		float3 p = rayStart + step * s;
 
 		GetAtmosphereDensity(p, planetCenter, lightDir, localDensity, densityPA);
-		densityCP += (localDensity + prevLocalDensity) * (stepSize / 2.0);
+		float2 avgDen = (localDensity + prevLocalDensity) / 2.0;
+		float2 deltaDen = avgDen * (stepSize);
+		densityCP += deltaDen;
+
+		prevLocalDensity = localDensity;
+
+		float3 localMultiScatAs1, localInscatterR, localInscatterM;
+		ComputeLocalInscattering(localDensity, densityPA, densityCP, localInscatterR, localInscatterM);
+
+		scatterR += (localInscatterR + prevLocalInscatterR) * (stepSize / 2.0);
+		scatterM += (localInscatterM + prevLocalInscatterM) * (stepSize / 2.0);
+
+		float3 Tr = densityCP.x * _ExtinctionR;
+		float3 Tm = densityCP.y * _ExtinctionM;
+		float3 dTr = deltaDen.x * _ExtinctionR;
+		float3 dTm = deltaDen.y * _ExtinctionM;
+
+		//MultiScatAs1 += exp(-(Tr + Tm)) * (1 - exp(-(dTr + dTm))) * (avgDen.x * _ScatteringR + avgDen.y * _ScatteringM) / (avgDen.x * _ExtinctionR + avgDen.y * _ExtinctionM);
+		MultiScatAs1 += exp(-(Tr + Tm)) * (1 - exp(-(dTr + dTm))) * (_ScatteringR + _ScatteringM) / (_ExtinctionR + _ExtinctionM);
+
+		prevLocalInscatterR = localInscatterR;
+		prevLocalInscatterM = localInscatterM;
+	}
+
+	// phase function
+	ApplyPhaseFunction(scatterR.xyz, scatterM.xyz, dot(rayDir, lightDir.xyz));
+	float3 lightInscatter = (scatterR * _ScatteringR + scatterM * _ScatteringM);
+
+	MulScatteringOutput output;
+	output.Lumanice = lightInscatter;
+	output.MultiScatAs1 = MultiScatAs1;
+
+	return output;
+}
+
+groupshared float3 MultiScatAs1SharedMem[64];
+groupshared float3 LSharedMem[64];
+
+
+[numthreads(1, 1, 64)]
+void NewMultiScattLUT(uint3 ThreadId : SV_DispatchThreadID)
+{
+	// linear parameters
+	float2 pixPos = float2(ThreadId.xy) + 0.5f;
+	float2 coords = pixPos / MultiScatteringLUTRes;
+
+	float sunZenithAngle = 2 * coords.x - 1;
+
+	float height = coords.y * _AtmosphereHeight;
+
+	float3 planetCenter = float3(0, -_PlanetRadius, 0);
+	float3 rayStart = float3(0, height, 0);
+
+	float3 lightDir = float3(sqrt(saturate(1 - sunZenithAngle * sunZenithAngle)), sunZenithAngle, 0);
+
+	const float SphereSolidAngle = 4.0 * PI;
+	const float IsotropicPhase = 1.0 / SphereSolidAngle;
+
+	float3 rayDir = float3(0, 1, 0);
+
+	// Reference. Since there are many sample, it requires MULTI_SCATTERING_POWER_SERIE to be true for accuracy and to avoid divergences (see declaration for explanations)
+#define SQRTSAMPLECOUNT 8
+	const float sqrtSample = float(SQRTSAMPLECOUNT);
+	float i = 0.5f + float(ThreadId.z / SQRTSAMPLECOUNT);
+	float j = 0.5f + float(ThreadId.z - float((ThreadId.z / SQRTSAMPLECOUNT) * SQRTSAMPLECOUNT));
+	{
+		float randA = i / sqrtSample;
+		float randB = j / sqrtSample;
+		float theta = 2.0f * PI * randA;
+		float phi = PI * randB;
+		float cosPhi = cos(phi);
+		float sinPhi = sin(phi);
+		float cosTheta = cos(theta);
+		float sinTheta = sin(theta);
+		rayDir.x = cosTheta * sinPhi;
+		rayDir.y = cosPhi;
+		rayDir.z = sinTheta * sinPhi;
+
+		float rayLength = 1e20;
+		float2 intersection = RaySphereIntersection(rayStart, rayDir, planetCenter, _PlanetRadius + _AtmosphereHeight);
+		rayLength = intersection.y;
+
+		intersection = RaySphereIntersection(rayStart, rayDir, planetCenter, _PlanetRadius);
+		if (intersection.x > 0)
+			rayLength = min(rayLength, intersection.x);
+
+		MulScatteringOutput result = IntegrateMultiInscattering(rayStart, rayDir, rayLength, planetCenter, lightDir);
+
+		MultiScatAs1SharedMem[ThreadId.z] = result.MultiScatAs1 * SphereSolidAngle / (sqrtSample * sqrtSample);
+		LSharedMem[ThreadId.z] = result.Lumanice * SphereSolidAngle / (sqrtSample * sqrtSample);
+	}
+#undef SQRTSAMPLECOUNT
+
+	GroupMemoryBarrierWithGroupSync();
+
+	// 64 to 32
+	if (ThreadId.z < 32)
+	{
+		MultiScatAs1SharedMem[ThreadId.z] += MultiScatAs1SharedMem[ThreadId.z + 32];
+		LSharedMem[ThreadId.z] += LSharedMem[ThreadId.z + 32];
+	}
+	GroupMemoryBarrierWithGroupSync();
+
+	// 32 to 16
+	if (ThreadId.z < 16)
+	{
+		MultiScatAs1SharedMem[ThreadId.z] += MultiScatAs1SharedMem[ThreadId.z + 16];
+		LSharedMem[ThreadId.z] += LSharedMem[ThreadId.z + 16];
+	}
+	GroupMemoryBarrierWithGroupSync();
+
+	// 16 to 8 (16 is thread group min hardware size with intel, no sync required from there)
+	if (ThreadId.z < 8)
+	{
+		MultiScatAs1SharedMem[ThreadId.z] += MultiScatAs1SharedMem[ThreadId.z + 8];
+		LSharedMem[ThreadId.z] += LSharedMem[ThreadId.z + 8];
+	}
+	GroupMemoryBarrierWithGroupSync();
+	if (ThreadId.z < 4)
+	{
+		MultiScatAs1SharedMem[ThreadId.z] += MultiScatAs1SharedMem[ThreadId.z + 4];
+		LSharedMem[ThreadId.z] += LSharedMem[ThreadId.z + 4];
+	}
+	GroupMemoryBarrierWithGroupSync();
+	if (ThreadId.z < 2)
+	{
+		MultiScatAs1SharedMem[ThreadId.z] += MultiScatAs1SharedMem[ThreadId.z + 2];
+		LSharedMem[ThreadId.z] += LSharedMem[ThreadId.z + 2];
+	}
+	GroupMemoryBarrierWithGroupSync();
+	if (ThreadId.z < 1)
+	{
+		MultiScatAs1SharedMem[ThreadId.z] += MultiScatAs1SharedMem[ThreadId.z + 1];
+		LSharedMem[ThreadId.z] += LSharedMem[ThreadId.z + 1];
+	}
+	GroupMemoryBarrierWithGroupSync();
+	if (ThreadId.z > 0)
+		return;
+
+	float3 MultiScatAs1 = MultiScatAs1SharedMem[0] * IsotropicPhase;	// Equation 7 f_ms
+	float3 InScatteredLuminance = LSharedMem[0] * IsotropicPhase;				// Equation 5 L_2ndOrder
+
+	// MultiScatAs1 represents the amount of luminance scattered as if the integral of scattered luminance over the sphere would be 1.
+	//  - 1st order of scattering: one can ray-march a straight path as usual over the sphere. That is InScatteredLuminance.
+	//  - 2nd order of scattering: the inscattered luminance is InScatteredLuminance at each of samples of fist order integration. Assuming a uniform phase function that is represented by MultiScatAs1,
+	//  - 3nd order of scattering: the inscattered luminance is (InScatteredLuminance * MultiScatAs1 * MultiScatAs1)
+	//  - etc.
+#if	0
+	float3 MultiScatAs1SQR = MultiScatAs1 * MultiScatAs1;
+	float3 L = InScatteredLuminance * (1.0 + MultiScatAs1 + MultiScatAs1SQR + MultiScatAs1 * MultiScatAs1SQR + MultiScatAs1SQR * MultiScatAs1SQR);
+#else
+	// For a serie, sum_{n=0}^{n=+inf} = 1 + r + r^2 + r^3 + ... + r^n = 1 / (1.0 - r), see https://en.wikipedia.org/wiki/Geometric_series 
+	const float3 r = MultiScatAs1;
+	const float3 SumOfAllMultiScatteringEventsContribution = 1.0f / (1.0 - r);
+	float3 L = InScatteredLuminance * SumOfAllMultiScatteringEventsContribution;// Equation 10 Psi_ms
+#endif
+
+	_MultiscattLUT[ThreadId.xy] = float4(_MultiScatterFactor * 50 * L, 1.0f);
+}
+
+float3 GetMultipleScattering(float3 position, float3 planetCenter, float3 lightDir)
+{
+	float height = length(position - planetCenter) - _PlanetRadius;
+
+	float cosAngle = dot(normalize(position - planetCenter), lightDir.xyz);
+
+	return _MultiscattLUTTex.SampleLevel(LinearClampSampler, float2(cosAngle * 0.5 + 0.5, (height / _AtmosphereHeight)), 0.0).rgb;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+
+//-----------------------------------------------------------------------------------------
+// IntegrateInscattering
+//-----------------------------------------------------------------------------------------
+ScatteringOutput IntegrateInscattering(float3 rayStart, float3 rayDir, float rayLength, float3 planetCenter, float3 lightDir)
+{
+	float sampleCount = 64;
+	float3 step = rayDir * (rayLength / sampleCount);
+	float stepSize = length(step);
+
+	float2 densityCP = 0;
+	float3 scatterR = 0;
+	float3 scatterM = 0;
+	float3 multiScatt = 0;
+
+	float2 localDensity;
+	float2 densityPA;
+
+	float2 prevLocalDensity;
+	float3 prevLocalInscatterR, prevLocalInscatterM;
+	GetAtmosphereDensity(rayStart, planetCenter, lightDir, prevLocalDensity, densityPA);
+	ComputeLocalInscattering(prevLocalDensity, densityPA, densityCP, prevLocalInscatterR, prevLocalInscatterM);
+
+	// P - current integration point
+	// C - camera position
+	// A - top of the atmosphere
+	[loop]
+	for (float s = 1.0; s < sampleCount; s += 1)
+	{
+		float3 p = rayStart + step * s;
+
+		GetAtmosphereDensity(p, planetCenter, lightDir, localDensity, densityPA);
+		float2 avgDen = (localDensity + prevLocalDensity) / 2.0;
+		densityCP += avgDen * (stepSize);
 
 		prevLocalDensity = localDensity;
 
 		float3 localInscatterR, localInscatterM;
 		ComputeLocalInscattering(localDensity, densityPA, densityCP, localInscatterR, localInscatterM);
-		
+
 		scatterR += (localInscatterR + prevLocalInscatterR) * (stepSize / 2.0);
 		scatterM += (localInscatterM + prevLocalInscatterM) * (stepSize / 2.0);
+		multiScatt += (avgDen.x * _ScatteringR + avgDen.y * _ScatteringM) * GetMultipleScattering(rayStart, planetCenter, lightDir);
 
 		prevLocalInscatterR = localInscatterR;
 		prevLocalInscatterM = localInscatterM;
@@ -186,6 +409,7 @@ ScatteringOutput IntegrateInscattering(float3 rayStart, float3 rayDir, float ray
 	ScatteringOutput output;
 	output.rayleigh = scatterR;
 	output.mie = scatterM;
+	output.multiScatt = multiScatt;
 
 	return output;
 }
@@ -201,6 +425,7 @@ void PrecomputeLightScattering(float3 rayStart, float3 rayDir, float rayLength, 
 	float2 densityCP = 0;
 	float3 scatterR = 0;
 	float3 scatterM = 0;
+	float3 multiScatt = 0;
 
 	float2 localDensity;
 	float2 densityPA;
@@ -222,7 +447,8 @@ void PrecomputeLightScattering(float3 rayStart, float3 rayDir, float rayLength, 
 		float3 p = rayStart + step * coords.z;
 
 		GetAtmosphereDensity(p, planetCenter, lightDir, localDensity, densityPA);
-		densityCP += (localDensity + prevLocalDensity) * (stepSize / 2.0);
+		float2 avgDen = (localDensity + prevLocalDensity) / 2.0;
+		densityCP += avgDen * (stepSize);
 
 		prevLocalDensity = localDensity;
 
@@ -231,6 +457,8 @@ void PrecomputeLightScattering(float3 rayStart, float3 rayDir, float rayLength, 
 
 		scatterR += (localInscatterR + prevLocalInscatterR) * (stepSize / 2.0);
 		scatterM += (localInscatterM + prevLocalInscatterM) * (stepSize / 2.0);
+		//multiScatt += (avgDen.x * _ScatteringR + avgDen.y * _ScatteringM) * GetMultipleScattering(rayStart, planetCenter, -lightDir);
+		multiScatt += 0.001 * (avgDen.x + avgDen.y) * GetMultipleScattering(rayStart, planetCenter, lightDir);
 
 		prevLocalInscatterR = localInscatterR;
 		prevLocalInscatterM = localInscatterM;
@@ -239,7 +467,7 @@ void PrecomputeLightScattering(float3 rayStart, float3 rayDir, float rayLength, 
 		float3 currentScatterM = scatterM;
 
 		ApplyPhaseFunction(currentScatterR, currentScatterM, dot(rayDir, -lightDir.xyz));
-		float3 lightInscatter = (currentScatterR * _ScatteringR + currentScatterM * _ScatteringM) * _IncomingLight.xyz;
+		float3 lightInscatter = (currentScatterR * _ScatteringR + currentScatterM * _ScatteringM + multiScatt) * _IncomingLight.xyz;
 		float3 lightExtinction = exp(-(densityCP.x * _ExtinctionR + densityCP.y * _ExtinctionM));
 
 		_InscatteringLUT[coords] = float4(lightInscatter, 1);
@@ -297,9 +525,7 @@ void SkyboxLUT(uint3 id : SV_DispatchThreadID)
 	//color.inscattering.z = coords.z;
 	_SkyboxLUT[id.xyz] = float4(scattering.rayleigh.xyz, scattering.mie.x);
 
-#ifdef HIGH_QUALITY
-	_SkyboxLUT2[id.xyz] = scattering.mie.yz;
-#endif
+	_SkyboxLUT2[id.xyz] = float4(scattering.multiScatt, 1);
 }
 
 //-----------------------------------------------------------------------------------------

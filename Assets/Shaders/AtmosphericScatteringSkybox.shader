@@ -127,18 +127,14 @@ Shader "Skybox/AtmosphericScattering"
 
 				scatterR = tex3D(_SkyboxLUT, coords);			
 
-#ifdef HIGH_QUALITY
-				scatterM.x = scatterR.w;
-				scatterM.yz = tex3D(_SkyboxLUT2, coords).xy;
-#else
 				scatterM.xyz = scatterR.xyz * ((scatterR.w) / (scatterR.x));// *(_ScatteringR.x / _ScatteringM.x) * (_ScatteringM / _ScatteringR);
-#endif
 
+				float3 multiScatt = tex3D(_SkyboxLUT2, coords).rgb;
 				float3 m = scatterM;
-				//scatterR = 0;
 				// phase function
 				ApplyPhaseFunctionElek(scatterR.xyz, scatterM.xyz, dot(rayDir, -lightDir.xyz));
-				float3 lightInscatter = (scatterR * _ScatteringR + scatterM * _ScatteringM) * _IncomingLight.xyz;
+
+				float3 lightInscatter = (scatterR * _ScatteringR + scatterM * _ScatteringM + multiScatt) * _IncomingLight.xyz;
 #ifdef RENDER_SUN
 				lightInscatter += RenderSun(m, dot(rayDir, -lightDir.xyz)) * _SunIntensity;
 #endif

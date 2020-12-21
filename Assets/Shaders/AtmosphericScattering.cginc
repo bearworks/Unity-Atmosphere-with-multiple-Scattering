@@ -52,6 +52,8 @@ sampler3D _SkyboxLUT2;
 sampler3D _InscatteringLUT;
 sampler3D _ExtinctionLUT;
 
+sampler2D _MultiscattLUTTex;
+
 //-----------------------------------------------------------------------------------------
 // RaySphereIntersection
 //-----------------------------------------------------------------------------------------
@@ -167,6 +169,15 @@ float3 ComputeOpticalDepth(float2 density)
 	return _IncomingLight.xyz * extinction;
 }
 
+float3 GetMultipleScattering(float3 position, float3 planetCenter, float3 lightDir)
+{
+	float height = length(position - planetCenter) - _PlanetRadius;
+
+	float cosAngle = dot(normalize(position - planetCenter), lightDir.xyz);
+
+	return tex2D(_MultiscattLUTTex, float2(cosAngle * 0.5 + 0.5, (height / _AtmosphereHeight))).rgb;
+}
+
 //-----------------------------------------------------------------------------------------
 // IntegrateInscattering
 //-----------------------------------------------------------------------------------------
@@ -178,6 +189,7 @@ float4 IntegrateInscattering(float3 rayStart, float3 rayDir, float rayLength, fl
 	float2 densityCP = 0;
 	float3 scatterR = 0;
 	float3 scatterM = 0;
+	float3 multiScatt = 0;
 
 	float2 localDensity;
 	float2 densityPA;
@@ -196,7 +208,8 @@ float4 IntegrateInscattering(float3 rayStart, float3 rayDir, float rayLength, fl
 		float3 p = rayStart + step * s;
 
 		GetAtmosphereDensity(p, planetCenter, lightDir, localDensity, densityPA);
-		densityCP += (localDensity + prevLocalDensity) * (stepSize / 2.0);
+		float2 avgDen = (localDensity + prevLocalDensity) / 2.0;
+		densityCP += avgDen * (stepSize);
 
 		prevLocalDensity = localDensity;
 
@@ -206,6 +219,8 @@ float4 IntegrateInscattering(float3 rayStart, float3 rayDir, float rayLength, fl
 		scatterR += (localInscatterR + prevLocalInscatterR) * (stepSize / 2.0);
 		scatterM += (localInscatterM + prevLocalInscatterM) * (stepSize / 2.0);
 
+		multiScatt += (avgDen.x * _ScatteringR + avgDen.y * _ScatteringM) * GetMultipleScattering(rayStart, planetCenter, lightDir);
+
 		prevLocalInscatterR = localInscatterR;
 		prevLocalInscatterM = localInscatterM;
 	}
@@ -214,7 +229,7 @@ float4 IntegrateInscattering(float3 rayStart, float3 rayDir, float rayLength, fl
 	// phase function
 	ApplyPhaseFunction(scatterR, scatterM, dot(rayDir, -lightDir.xyz));
 	//scatterR = 0;
-	float3 lightInscatter = (scatterR * _ScatteringR + scatterM * _ScatteringM) * _IncomingLight.xyz;
+	float3 lightInscatter = (scatterR * _ScatteringR + scatterM * _ScatteringM + multiScatt) * _IncomingLight.xyz;
 	lightInscatter += RenderSun(m, dot(rayDir, -lightDir.xyz)) * _SunIntensity;
 	float3 lightExtinction = exp(-(densityCP.x * _ExtinctionR + densityCP.y * _ExtinctionM));
 

@@ -32,6 +32,7 @@ class AtmosphericScatteringEditor : Editor
     SerializedProperty ReflectionProbe;
     SerializedProperty ReflectionProbeResolution;
     SerializedProperty DistanceScale;
+    SerializedProperty MultiScatterFactor;
 
     string[] ResolutionNames = { "32", "64", "128", "256" };
     int[] Resolutions = { 32, 64, 128, 256 };
@@ -78,6 +79,7 @@ class AtmosphericScatteringEditor : Editor
         ReflectionProbe = serializedObject.FindProperty("ReflectionProbe");
         ReflectionProbeResolution = serializedObject.FindProperty("ReflectionProbeResolution");
         DistanceScale = serializedObject.FindProperty("DistanceScale");
+        MultiScatterFactor = serializedObject.FindProperty("MultiScatterFactor");
     }
 
     public override void OnInspectorGUI()
@@ -115,6 +117,7 @@ class AtmosphericScatteringEditor : Editor
             MieScatterCoef.floatValue = EditorGUILayout.Slider("Mie Coef (*)", MieScatterCoef.floatValue, 0, 4);
             MieG.floatValue = EditorGUILayout.Slider("MieG", MieG.floatValue, 0, 0.999f);
             DistanceScale.floatValue = EditorGUILayout.FloatField("Distance Scale", DistanceScale.floatValue);
+            MultiScatterFactor.floatValue = EditorGUILayout.FloatField("MultiScatterFactor (*)", MultiScatterFactor.floatValue);
             GUILayout.Label("* - Change requires LookUp table update");
             if (GUILayout.Button("Update LookUp Tables") && a.IsInitialized())
                 ((AtmosphericScattering)target).CalculateLightLUTs();
